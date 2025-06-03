@@ -13,6 +13,7 @@ from typing import Optional, Set, Dict, Any, Union
 from dataclasses import dataclass
 import tempfile
 import shutil
+from winotify import Notification, audio
 
 import pandas as pd
 from selenium import webdriver
@@ -48,7 +49,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file_path),
+        logging.FileHandler(log_file_path, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -66,10 +67,10 @@ class Config:
         self.CONTACTS_FILE_PATH: str = str(get_resource_path("contacts.xlsx"))
         
         # Other settings
-        self.WAIT_TIMEOUT: int = 50
+        self.WAIT_TIMEOUT: int = 50  # Increased to 50 seconds
         self.LOGIN_TIMEOUT: int = 600
-        self.MAX_RETRIES: int = 5
-        self.RETRY_DELAY: int = 2
+        self.MAX_RETRIES: int = 5    # Increased to 5 retries
+        self.RETRY_DELAY: int = 2    # Increased to 2 seconds
 
     def __post_init__(self):
         """Validate paths after initialization."""
@@ -299,6 +300,22 @@ class MessageSender:
     def __init__(self, driver: WhatsAppDriver, config: Config):
         self.driver = driver
         self.config = config
+        self.toast = Notification(
+            app_id="WhatsApp Automation",
+            title="WhatsApp Automation",
+            msg="Starting message sending process...",
+            duration="short",
+            icon=r"C:\Windows\System32\shell32.dll,0"
+        )
+
+    def show_notification(self, title: str, message: str, error: bool = False):
+        """Show a Windows notification."""
+        try:
+            self.toast.title = title
+            self.toast.msg = message
+            self.toast.show()
+        except Exception as e:
+            logging.error(f"Failed to show notification: {e}")
 
     @staticmethod
     def retry_on_stale(max_retries: int = 5, retry_delay: int = 2):
@@ -310,32 +327,15 @@ class MessageSender:
                         return func(self, *args, **kwargs)
                     except StaleElementReferenceException:
                         if attempt == max_retries - 1:
-                            logging.error(f"Failed after {max_retries} attempts")
+                            error_msg = f"Failed after {max_retries} attempts"
+                            logging.error(error_msg)
+                            self.show_notification("Error", error_msg, error=True)
                             return False
                         logging.warning(f"Stale element, retrying ({attempt+1}/{max_retries})...")
                         time.sleep(retry_delay)
                 return False
             return wrapper
         return decorator
-
-    @retry_on_stale(max_retries=5, retry_delay=2)
-    def find_element_with_retry(self, by: By, value: str, timeout: int = None) -> Any:
-        """Find an element with retry mechanism."""
-        if timeout is None:
-            timeout = self.config.WAIT_TIMEOUT
-            
-        try:
-            # First wait for element to be present
-            element = WebDriverWait(self.driver.driver, timeout).until(
-                EC.presence_of_element_located((by, value))
-            )
-            return element
-        except (TimeoutException, NoSuchElementException) as e:
-            logging.error(f"Element not found: {by}={value}")
-            return None
-        except StaleElementReferenceException:
-            logging.warning(f"Stale element while finding: {by}={value}")
-            return None
 
     def safe_element_interaction(self, locator, action, *args, **kwargs):
         for attempt in range(self.config.MAX_RETRIES):
@@ -359,10 +359,14 @@ class MessageSender:
                     'session deleted as the browser has closed the connection' in error_str.lower() or
                     'not connected to devtools' in error_str.lower()
                 ):
-                    logging.error("\n" + "*"*50 + f"\nCRITICAL ERROR: {error_str}\nTerminating program immediately.")
+                    error_msg = f"CRITICAL ERROR: {error_str}"
+                    self.show_notification("Critical Error", error_msg, error=True)
+                    logging.error("\n" + "*"*50 + f"\n{error_msg}\nTerminating program immediately.")
                     sys.exit(1)
                 if attempt == self.config.MAX_RETRIES - 1:
-                    logging.error("\n" + "*"*50 + f"\nFailed to interact with element after {self.config.MAX_RETRIES} attempts: {e}")
+                    error_msg = f"Failed to interact with element after {self.config.MAX_RETRIES} attempts: {error_str}"
+                    self.show_notification("Element Interaction Failed", error_msg, error=True)
+                    logging.error("\n" + "*"*50 + f"\n{error_msg}")
                     return False
                 logging.warning("\n" + "*"*50 + f"\nException during {action} ({type(e).__name__}), retrying ({attempt+1}/{self.config.MAX_RETRIES})...")
                 time.sleep(self.config.RETRY_DELAY)
@@ -384,44 +388,75 @@ class MessageSender:
             # Search contact
             logging.info("Attempting to find search box...")
             if not self.safe_element_interaction(search_box_locator, "clear"):
-                logging.error("Could not clear search box")
+                error_msg = "Could not clear search box"
+                self.show_notification("Error", error_msg, error=True)
+                logging.error(error_msg)
                 return False
+
             if not self.safe_element_interaction(search_box_locator, "send_keys", Keys.CONTROL + "a"):
+                error_msg = "Could not select all text in search box"
+                self.show_notification("Error", error_msg, error=True)
                 return False
+
             if not self.safe_element_interaction(search_box_locator, "send_keys", Keys.DELETE):
+                error_msg = "Could not delete text in search box"
+                self.show_notification("Error", error_msg, error=True)
                 return False
+
             if not self.safe_element_interaction(search_box_locator, "send_keys", contact_mobile_number):
+                error_msg = "Could not enter phone number in search box"
+                self.show_notification("Error", error_msg, error=True)
                 return False
+
             time.sleep(2)
             if not self.safe_element_interaction(search_box_locator, "send_keys", Keys.ENTER):
+                error_msg = "Could not submit search"
+                self.show_notification("Error", error_msg, error=True)
                 return False
 
             # Click search result
             logging.info("Attempting to find search results...")
             if not self.safe_element_interaction(search_result_locator, "click"):
-                logging.error("Could not click search results")
+                error_msg = "Could not click search results"
+                self.show_notification("Error", error_msg, error=True)
+                logging.error(error_msg)
                 return False
 
             logging.info("Attempting to find specific search item...")
             if not self.safe_element_interaction(search_item_locator, "click"):
-                logging.error("Could not click search item")
+                error_msg = "Could not click search item"
+                self.show_notification("Error", error_msg, error=True)
+                logging.error(error_msg)
                 return False
+
             time.sleep(2)
 
             # Send message
             logging.info("Attempting to find message box...")
             if not self.safe_element_interaction(message_box_locator, "click"):
-                logging.error("Could not click message box")
+                error_msg = "Could not click message box"
+                self.show_notification("Error", error_msg, error=True)
+                logging.error(error_msg)
                 return False
+
             time.sleep(2)
 
             # Clear message box thoroughly
             if not self.safe_element_interaction(message_box_locator, "clear"):
+                error_msg = "Could not clear message box"
+                self.show_notification("Error", error_msg, error=True)
                 return False
+
             if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.CONTROL + "a"):
+                error_msg = "Could not select all text in message box"
+                self.show_notification("Error", error_msg, error=True)
                 return False
+
             if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.DELETE):
+                error_msg = "Could not delete text in message box"
+                self.show_notification("Error", error_msg, error=True)
                 return False
+
             time.sleep(1)
 
             # Handle multi-line messages using clipboard
@@ -449,22 +484,32 @@ class MessageSender:
                             logging.warning(f"Failed to paste line {i+1}, trying alternative method")
                             # Alternative method if paste fails
                             if not self.safe_element_interaction(message_box_locator, "send_keys", line):
-                                logging.error(f"Failed to send line {i+1}")
+                                error_msg = f"Failed to send line {i+1}"
+                                self.show_notification("Error", error_msg, error=True)
+                                logging.error(error_msg)
                                 return False
 
                     if i < len(lines) - 1:  # If not the last line
                         if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.SHIFT + Keys.ENTER):
+                            error_msg = "Could not add new line"
+                            self.show_notification("Error", error_msg, error=True)
                             return False
                         time.sleep(0.5)
 
                 time.sleep(1)
                 # Send the message
                 if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.ENTER):
+                    error_msg = "Could not send message"
+                    self.show_notification("Error", error_msg, error=True)
                     return False
+
+                self.show_notification("Success", "Message sent successfully!")
                 return True
 
             except Exception as e:
-                logging.error(f"Error in message sending method: {str(e)}")
+                error_msg = f"Error in message sending method: {str(e)}"
+                self.show_notification("Error", error_msg, error=True)
+                logging.error(error_msg)
                 # Fallback to simple character-by-character method
                 try:
                     lines = contact_message.split('\n')
@@ -480,16 +525,24 @@ class MessageSender:
                         
                         if i < len(lines) - 1:  # If not the last line
                             if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.SHIFT + Keys.ENTER):
+                                error_msg = "Could not add new line in fallback method"
+                                self.show_notification("Error", error_msg, error=True)
                                 return False
                             time.sleep(0.5)
 
                     time.sleep(1)
                     # Send the message
                     if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.ENTER):
+                        error_msg = "Could not send message in fallback method"
+                        self.show_notification("Error", error_msg, error=True)
                         return False
+
+                    self.show_notification("Success", "Message sent successfully using fallback method!")
                     return True
                 except Exception as e2:
-                    logging.error(f"Error in fallback message sending method: {str(e2)}")
+                    error_msg = f"Error in fallback message sending method: {str(e2)}"
+                    self.show_notification("Error", error_msg, error=True)
+                    logging.error(error_msg)
                     return False
 
         except (NoSuchElementException, TimeoutException, 
@@ -504,9 +557,13 @@ class MessageSender:
                 'session deleted as the browser has closed the connection' in error_str.lower() or
                 'not connected to devtools' in error_str.lower()
             ):
-                logging.error("\n" + "*"*50 + f"\nCRITICAL ERROR: {error_str}\nTerminating program immediately.")
+                error_msg = f"CRITICAL ERROR: {error_str}"
+                self.show_notification("Critical Error", error_msg, error=True)
+                logging.error("\n" + "*"*50 + f"\n{error_msg}\nTerminating program immediately.")
                 sys.exit(1)
-            logging.error("\n" + "*"*50 + f"\nError sending message: {error_str}")
+            error_msg = f"Error sending message: {error_str}"
+            self.show_notification("Error", error_msg, error=True)
+            logging.error("\n" + "*"*50 + f"\n{error_msg}")
             return False
 
 def main():
@@ -532,6 +589,7 @@ def main():
     # Initialize tracking dictionaries
     successful_sends = {}  # phone_number: name
     failed_sends = {}      # phone_number: (name, reason)
+    skipped_sends = {}     # phone_number: (name, reason)
     total_contacts = 0
 
     try:
@@ -563,26 +621,32 @@ def main():
             contact_message = row['Message']
             contact_mobile_number = contact_manager.clean_phone_number(row['Mobile Phone'])
 
-            logging.info(f"\nProcessing contact {current_contact}/{total_contacts}: {contact_name} ({contact_mobile_number})")
+            logging.info(f"\n{'='*50}")
+            logging.info(f"Processing contact {current_contact}/{total_contacts}")
+            logging.info(f"Name: {contact_name}")
+            logging.info(f"Phone: {contact_mobile_number}")
+            logging.info(f"{'='*50}")
 
             if contact_mobile_number in contact_manager.sent_numbers:
-                logging.info(f"Message already sent to {contact_name}. Skipping...")
-                failed_sends[contact_mobile_number] = (contact_name, "Message already sent previously")
+                skip_reason = "Message already sent previously"
+                logging.info(f"⏭️ Skipping {contact_name}: {skip_reason}")
+                skipped_sends[contact_mobile_number] = (contact_name, skip_reason)
                 continue
 
             contact_manager.sent_numbers.add(contact_mobile_number)
-            logging.info(f"Sending message to {contact_name}...")
+            logging.info(f"📤 Sending message to {contact_name}...")
 
             try:
                 if message_sender.send_message(contact_mobile_number, contact_message):
-                    logging.info(f"✓ Message sent successfully to {contact_name}")
+                    logging.info(f"✅ Message sent successfully to {contact_name}")
                     successful_sends[contact_mobile_number] = contact_name
                 else:
-                    logging.info(f"✗ Failed to send message to {contact_name}")
-                    failed_sends[contact_mobile_number] = (contact_name, "Failed to send message - Element interaction failed")
+                    fail_reason = "Failed to send message - Element interaction failed"
+                    logging.info(f"❌ Failed to send message to {contact_name}")
+                    failed_sends[contact_mobile_number] = (contact_name, fail_reason)
             except Exception as e:
                 error_msg = str(e)
-                logging.info(f"✗ Error sending message to {contact_name}: {error_msg}")
+                logging.info(f"❌ Error sending message to {contact_name}: {error_msg}")
                 failed_sends[contact_mobile_number] = (contact_name, f"Error: {error_msg}")
 
             # Add a small delay between contacts
@@ -601,24 +665,34 @@ def main():
             time.sleep(5)
             whatsapp_driver.quit()
 
-        # print summary report
+        # Print summary report
         logging.info("\n" + "="*50)
         logging.info("MESSAGE SENDING SUMMARY")
         logging.info("="*50)
-        logging.info(f"Total contacts processed: {total_contacts}")
+        logging.info(f"Total contacts: {total_contacts}")
         logging.info(f"Successfully sent: {len(successful_sends)}")
         logging.info(f"Failed to send: {len(failed_sends)}")
+        logging.info(f"Skipped: {len(skipped_sends)}")
         
-        # if successful_sends:
-        #     logging.info("\nSuccessfully sent messages to:")
-        #     for phone, name in successful_sends.items():
-        #         logging.info(f"✓ {name} ({phone})")
+        if successful_sends:
+            logging.info("\n✅ Successfully sent messages to:")
+            for phone, name in successful_sends.items():
+                logging.info(f"  • {name} ({phone})")
         
         if failed_sends:
-            logging.info("\nFailed to send messages to:")
+            logging.info("\n❌ Failed to send messages to:")
             for phone, (name, reason) in failed_sends.items():
-                logging.info(f"✗ {name} ({phone})")
-                logging.info(f"  Reason: {reason}")
+                logging.info(f"  • {name} ({phone})")
+                logging.info(f"    Reason: {reason}")
+        
+        if skipped_sends:
+            logging.info("\n⏭️ Skipped contacts:")
+            for phone, (name, reason) in skipped_sends.items():
+                logging.info(f"  • {name} ({phone})")
+                logging.info(f"    Reason: {reason}")
+        
+        logging.info("\n" + "="*50)
+        logging.info("END OF RUN")
         logging.info("="*50 + "\n")
 
 if __name__ == "__main__":
