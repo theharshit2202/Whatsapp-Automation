@@ -1,6 +1,69 @@
 """
-WhatsApp Automation Script
-This script automates sending messages to contacts via WhatsApp Web using Selenium.
+WhatsApp Web Automation Script
+
+This script automates sending WhatsApp messages to contacts from an Excel file.
+It includes robust error handling, session management, and progress tracking.
+
+Key Features:
+1. Session Management:
+   - Automatic session refresh every 30 minutes
+   - Session health monitoring and recovery
+   - Browser cleanup and resource management
+   - Automation detection prevention
+
+2. Progress Tracking:
+   - JSON-based progress storage
+   - Detailed contact tracking (name, phone, message)
+   - Progress comparison with Excel data
+   - Automatic progress backup
+   - Resume capability from last successful point
+
+3. Message Handling:
+   - Support for special characters and emojis
+   - Multi-line message support
+   - Clipboard-based text input
+   - Character-by-character fallback method
+   - Message box clearing and validation
+
+4. Error Recovery:
+   - Comprehensive error handling
+   - Automatic retry mechanism
+   - Session recovery on failures
+   - Progress preservation on crashes
+   - Detailed error logging
+
+5. User Interface:
+   - Windows notifications for events
+   - Progress indicators
+   - Detailed logging
+   - End-of-run summary report
+   - Clear user prompts
+
+6. Contact Processing:
+   - Phone number validation and cleaning
+   - Duplicate detection
+   - Contact tracking
+   - Flexible processing options
+
+7. File Handling:
+   - Multiple encoding support
+   - File validation
+   - Progress file backup
+   - Excel data processing
+
+Dependencies:
+- selenium
+- pandas
+- win10toast
+- webdriver_manager
+
+Usage:
+1. Prepare Excel file with columns: Name, Phone, Message
+2. Run script
+3. Scan QR code when prompted
+4. Choose processing options when available
+
+Note: Ensure Chrome browser is installed and up to date.
 """
 
 import os
@@ -14,6 +77,7 @@ from dataclasses import dataclass
 import tempfile
 import shutil
 from winotify import Notification, audio
+import json
 
 import pandas as pd
 from selenium import webdriver
@@ -105,6 +169,30 @@ class WhatsAppDriver:
         self.config = config
         self.driver: Optional[webdriver.Chrome] = None
         self.wait: Optional[WebDriverWait] = None
+        self.last_refresh_time = time.time()
+        self.refresh_interval = 1800  # 30 minutes in seconds
+
+    def refresh_session(self) -> bool:
+        """Refresh the Chrome session to prevent timeouts."""
+        try:
+            if self.driver:
+                logging.info("Refreshing Chrome session...")
+                self.driver.refresh()
+                self.last_refresh_time = time.time()
+                # Wait for WhatsApp to reload
+                time.sleep(5)
+                return True
+            return False
+        except Exception as e:
+            logging.error(f"Failed to refresh session: {e}")
+            return False
+
+    def check_and_refresh_session(self) -> bool:
+        """Check if session needs refresh and refresh if necessary."""
+        current_time = time.time()
+        if current_time - self.last_refresh_time > self.refresh_interval:
+            return self.refresh_session()
+        return True
 
     def create_driver(self) -> webdriver.Chrome:
         """Create and configure the Chrome WebDriver instance using existing user profile."""
@@ -119,6 +207,9 @@ class WhatsAppDriver:
         options.add_argument("--disable-notifications")
         options.add_argument("--start-maximized")
         options.add_argument("--log-level=3")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
         
         # Use existing Chrome user profile with proper configuration
         user_data_dir = os.path.join(self.config.USER_PROFILE_PATH, "WhatsApp")
@@ -135,6 +226,7 @@ class WhatsAppDriver:
                 self.driver = webdriver.Chrome(options=options)
                 
             self.wait = WebDriverWait(self.driver, self.config.WAIT_TIMEOUT)
+            self.last_refresh_time = time.time()
             return self.driver
         except Exception as e:
             logging.error(f"Failed to create Chrome driver: {str(e)}")
@@ -142,7 +234,6 @@ class WhatsAppDriver:
 
     def initialize_whatsapp(self) -> bool:
         """Initialize WhatsApp Web and wait for it to be ready."""
-            
         try:
             self.driver.get("https://web.whatsapp.com/")
             WebDriverWait(self.driver, self.config.LOGIN_TIMEOUT).until(
@@ -183,6 +274,77 @@ class ContactManager:
             '.xlsx': 'openpyxl',
             '.xls': 'xlrd'
         }
+        self.progress_file = get_resource_path('progress.json')
+        self.last_successful_index = 0
+        self.progress_data = self.load_progress()
+
+    def load_progress(self) -> dict:
+        """Load progress data from JSON file."""
+        try:
+            if self.progress_file.exists():
+                with open(self.progress_file, 'r') as f:
+                    data = json.load(f)
+                    logging.info(f"Loaded progress data from: {self.progress_file}")
+                    return data
+            logging.info("No progress file found. Starting fresh.")
+            return {}
+        except Exception as e:
+            logging.error(f"Error loading progress: {e}")
+            return {}
+
+    def compare_with_excel(self, contacts_df: pd.DataFrame) -> tuple:
+        """Compare progress data with Excel data and return matching information."""
+        matches = []
+        mismatches = []
+        
+        for _, row in contacts_df.iterrows():
+            name = row['First Name'].strip()
+            phone = self.clean_phone_number(row['Mobile Phone'])
+            message = row['Message']
+            
+            # Check if this contact exists in progress data
+            if phone in self.progress_data:
+                progress_entry = self.progress_data[phone]
+                if (progress_entry.get('name') == name and 
+                    progress_entry.get('message') == message):
+                    matches.append((name, phone))
+                else:
+                    mismatches.append((name, phone, "Message or name changed"))
+            else:
+                mismatches.append((name, phone, "Not in progress file"))
+        
+        return matches, mismatches
+
+    def reset_progress(self) -> None:
+        """Reset the progress file to start fresh."""
+        try:
+            if self.progress_file.exists():
+                # Create a backup of the old progress file
+                backup_file = self.progress_file.with_suffix('.json.bak')
+                shutil.copy2(self.progress_file, backup_file)
+                self.progress_file.unlink()
+                logging.info(f"Created backup of progress file at: {backup_file}")
+            
+            self.progress_data = {}
+            self.last_successful_index = 0
+            self.sent_numbers.clear()
+            logging.info("Progress has been reset. All contacts will be processed.")
+        except Exception as e:
+            logging.error(f"Error resetting progress: {e}")
+
+    def save_progress(self, index: int, name: str, phone: str, message: str) -> None:
+        """Save progress data including contact details."""
+        try:
+            self.progress_data[phone] = {
+                'name': name,
+                'message': message,
+                'index': index
+            }
+            with open(self.progress_file, 'w') as f:
+                json.dump(self.progress_data, f, indent=2)
+            logging.info(f"Saved progress for {name} ({phone})")
+        except Exception as e:
+            logging.error(f"Error saving progress: {e}")
 
     def install_required_package(self, package_name: str) -> bool:
         """Install required package using pip."""
@@ -340,6 +502,10 @@ class MessageSender:
     def safe_element_interaction(self, locator, action, *args, **kwargs):
         for attempt in range(self.config.MAX_RETRIES):
             try:
+                # Check and refresh session if needed
+                if not self.driver.check_and_refresh_session():
+                    raise WebDriverException("Session refresh failed")
+
                 element = self.driver.driver.find_element(*locator)
                 if action == "click":
                     element.click()
@@ -359,10 +525,15 @@ class MessageSender:
                     'session deleted as the browser has closed the connection' in error_str.lower() or
                     'not connected to devtools' in error_str.lower()
                 ):
-                    error_msg = f"CRITICAL ERROR: {error_str}"
-                    self.show_notification("Critical Error", error_msg, error=True)
-                    logging.error("\n" + "*"*50 + f"\n{error_msg}\nTerminating program immediately.")
-                    sys.exit(1)
+                    # Try to recover the session
+                    if self.driver.refresh_session():
+                        logging.info("Session recovered successfully")
+                        continue
+                    else:
+                        error_msg = f"CRITICAL ERROR: {error_str}"
+                        self.show_notification("Critical Error", error_msg, error=True)
+                        logging.error("\n" + "*"*50 + f"\n{error_msg}\nTerminating program immediately.")
+                        sys.exit(1)
                 if attempt == self.config.MAX_RETRIES - 1:
                     error_msg = f"Failed to interact with element after {self.config.MAX_RETRIES} attempts: {error_str}"
                     self.show_notification("Element Interaction Failed", error_msg, error=True)
@@ -600,6 +771,64 @@ def main():
 
         total_contacts = len(contacts_df)
         logging.info(f"\nTotal contacts to process: {total_contacts}")
+        
+        # Compare progress with current Excel data
+        matches, mismatches = contact_manager.compare_with_excel(contacts_df)
+        
+        if matches:
+            logging.info("\nFound matching contacts in progress file:")
+            for name, phone in matches:
+                logging.info(f"✓ {name} ({phone})")
+            
+            logging.info("\nFound contacts with changes or new contacts:")
+            for name, phone, reason in mismatches:
+                logging.info(f"! {name} ({phone}) - {reason}")
+            
+            while True:
+                print("\nOptions:")
+                print("1. Continue from where we left off (skip matching contacts)")
+                print("2. Start fresh (reset progress and process all contacts)")
+                print("3. Exit")
+                choice = input("\nEnter your choice (1-3): ").strip()
+                
+                if choice == '1':
+                    logging.info("Continuing from previous progress...")
+                    break
+                elif choice == '2':
+                    contact_manager.reset_progress()
+                    logging.info("Progress reset. Starting fresh with all contacts.")
+                    break
+                elif choice == '3':
+                    logging.info("Exiting program.")
+                    return
+                else:
+                    print("Invalid choice. Please enter 1, 2, or 3.")
+        else:
+            logging.info("\nNo matching contacts found in progress file.")
+            if contact_manager.progress_data:
+                logging.info("Previous progress data exists but doesn't match current contacts.")
+                while True:
+                    print("\nOptions:")
+                    print("1. Skip previously processed contacts")
+                    print("2. Start fresh (reset progress)")
+                    print("3. Exit")
+                    choice = input("\nEnter your choice (1-3): ").strip()
+                    
+                    if choice == '1':
+                        logging.info("Will skip previously processed contacts...")
+                        # Keep the progress data but mark it as completed
+                        for phone in contact_manager.progress_data:
+                            contact_manager.sent_numbers.add(phone)
+                        break
+                    elif choice == '2':
+                        contact_manager.reset_progress()
+                        logging.info("Progress reset. Starting fresh with all contacts.")
+                        break
+                    elif choice == '3':
+                        logging.info("Exiting program.")
+                        return
+                    else:
+                        print("Invalid choice. Please enter 1, 2, or 3.")
 
         # Try to initialize WhatsApp automation
         try:
@@ -621,6 +850,15 @@ def main():
             contact_message = row['Message']
             contact_mobile_number = contact_manager.clean_phone_number(row['Mobile Phone'])
 
+            # Skip if this contact matches progress data and we're continuing from previous progress
+            if contact_mobile_number in contact_manager.progress_data:
+                progress_entry = contact_manager.progress_data[contact_mobile_number]
+                if (progress_entry.get('name') == contact_name and 
+                    progress_entry.get('message') == contact_message):
+                    logging.info(f"Skipping {contact_name} - already processed with same message")
+                    skipped_sends[contact_mobile_number] = (contact_name, "Already processed")
+                    continue
+
             logging.info(f"\n{'='*50}")
             logging.info(f"Processing contact {current_contact}/{total_contacts}")
             logging.info(f"Name: {contact_name}")
@@ -640,6 +878,8 @@ def main():
                 if message_sender.send_message(contact_mobile_number, contact_message):
                     logging.info(f"✅ Message sent successfully to {contact_name}")
                     successful_sends[contact_mobile_number] = contact_name
+                    # Save progress with contact details
+                    contact_manager.save_progress(index, contact_name, contact_mobile_number, contact_message)
                 else:
                     fail_reason = "Failed to send message - Element interaction failed"
                     logging.info(f"❌ Failed to send message to {contact_name}")
