@@ -1,69 +1,6 @@
 """
-WhatsApp Web Automation Script
-
-This script automates sending WhatsApp messages to contacts from an Excel file.
-It includes robust error handling, session management, and progress tracking.
-
-Key Features:
-1. Session Management:
-   - Automatic session refresh every 30 minutes
-   - Session health monitoring and recovery
-   - Browser cleanup and resource management
-   - Automation detection prevention
-
-2. Progress Tracking:
-   - JSON-based progress storage
-   - Detailed contact tracking (name, phone, message)
-   - Progress comparison with Excel data
-   - Automatic progress backup
-   - Resume capability from last successful point
-
-3. Message Handling:
-   - Support for special characters and emojis
-   - Multi-line message support
-   - Clipboard-based text input
-   - Character-by-character fallback method
-   - Message box clearing and validation
-
-4. Error Recovery:
-   - Comprehensive error handling
-   - Automatic retry mechanism
-   - Session recovery on failures
-   - Progress preservation on crashes
-   - Detailed error logging
-
-5. User Interface:
-   - Windows notifications for events
-   - Progress indicators
-   - Detailed logging
-   - End-of-run summary report
-   - Clear user prompts
-
-6. Contact Processing:
-   - Phone number validation and cleaning
-   - Duplicate detection
-   - Contact tracking
-   - Flexible processing options
-
-7. File Handling:
-   - Multiple encoding support
-   - File validation
-   - Progress file backup
-   - Excel data processing
-
-Dependencies:
-- selenium
-- pandas
-- win10toast
-- webdriver_manager
-
-Usage:
-1. Prepare Excel file with columns: Name, Phone, Message
-2. Run script
-3. Scan QR code when prompted
-4. Choose processing options when available
-
-Note: Ensure Chrome browser is installed and up to date.
+WhatsApp Automation Script
+This script automates sending messages to contacts via WhatsApp Web using Selenium.
 """
 
 import os
@@ -97,6 +34,9 @@ from selenium.common.exceptions import (
     SessionNotCreatedException,
 )
 
+# Add this near the top of the file, after imports
+SESSION_RESTART_INTERVAL = 1800  # 30 minutes (change here to update everywhere)
+
 def get_resource_path(relative_path: str = "") -> Path:
     """Get the absolute path to a resource file, accounting for frozen(executable) vs. non-frozen (script) environments.
     """
@@ -128,7 +68,7 @@ class Config:
         
         # Set up paths for driver and contacts file using resource path
         self.CHROME_DRIVER_PATH: str = str(get_resource_path("chromedriver.exe"))
-        self.CONTACTS_FILE_PATH: str = str(get_resource_path("contacts.xlsx"))
+        self.CONTACTS_FILE_PATH: str = str(get_resource_path("testing.xlsx"))
         
         # Other settings
         self.WAIT_TIMEOUT: int = 50  # Increased to 50 seconds
@@ -522,10 +462,10 @@ class MessageSender:
                     'max retries exceeded' in error_str.lower() or
                     'actively refused' in error_str.lower() or
                     'invalid session id' in error_str.lower() or
-                    'session deleted as the browser has closed the connection' in error_str.lower() or
+                    'browser has closed the connection' in error_str.lower() or
                     'not connected to devtools' in error_str.lower()
                 ):
-                    # Try to recover the session
+                    logging.info("Session error detected, restarting browser session to maintain continuity.")
                     if self.driver.refresh_session():
                         logging.info("Session recovered successfully")
                         continue
@@ -725,7 +665,7 @@ class MessageSender:
                 'max retries exceeded' in error_str.lower() or
                 'actively refused' in error_str.lower() or
                 'invalid session id' in error_str.lower() or
-                'session deleted as the browser has closed the connection' in error_str.lower() or
+                'browser has closed the connection' in error_str.lower() or
                 'not connected to devtools' in error_str.lower()
             ):
                 error_msg = f"CRITICAL ERROR: {error_str}"
@@ -843,6 +783,9 @@ def main():
             logging.error(f"Could not initialize WhatsApp automation: {e}")
             return
 
+        # Session restart logic
+        session_start_time = time.time()
+
         # Process each contact
         for index, row in contacts_df.iterrows():
             current_contact = index + 1
@@ -850,47 +793,70 @@ def main():
             contact_message = row['Message']
             contact_mobile_number = contact_manager.clean_phone_number(row['Mobile Phone'])
 
-            # Skip if this contact matches progress data and we're continuing from previous progress
-            if contact_mobile_number in contact_manager.progress_data:
-                progress_entry = contact_manager.progress_data[contact_mobile_number]
-                if (progress_entry.get('name') == contact_name and 
-                    progress_entry.get('message') == contact_message):
-                    logging.info(f"Skipping {contact_name} - already processed with same message")
-                    skipped_sends[contact_mobile_number] = (contact_name, "Already processed")
-                    continue
-
-            logging.info(f"\n{'='*50}")
-            logging.info(f"Processing contact {current_contact}/{total_contacts}")
-            logging.info(f"Name: {contact_name}")
-            logging.info(f"Phone: {contact_mobile_number}")
-            logging.info(f"{'='*50}")
-
-            if contact_mobile_number in contact_manager.sent_numbers:
-                skip_reason = "Message already sent previously"
-                logging.info(f"⏭️ Skipping {contact_name}: {skip_reason}")
-                skipped_sends[contact_mobile_number] = (contact_name, skip_reason)
-                continue
-
-            contact_manager.sent_numbers.add(contact_mobile_number)
-            logging.info(f"📤 Sending message to {contact_name}...")
-
+            # Session restart check
+            need_restart = False
+            if time.time() - session_start_time >= SESSION_RESTART_INTERVAL:
+                logging.info(f"Session restart interval ({SESSION_RESTART_INTERVAL} seconds) reached, restarting browser session to maintain continuity.")
+                need_restart = True
             try:
-                if message_sender.send_message(contact_mobile_number, contact_message):
-                    logging.info(f"✅ Message sent successfully to {contact_name}")
-                    successful_sends[contact_mobile_number] = contact_name
-                    # Save progress with contact details
-                    contact_manager.save_progress(index, contact_name, contact_mobile_number, contact_message)
-                else:
-                    fail_reason = "Failed to send message - Element interaction failed"
-                    logging.info(f"❌ Failed to send message to {contact_name}")
-                    failed_sends[contact_mobile_number] = (contact_name, fail_reason)
-            except Exception as e:
-                error_msg = str(e)
-                logging.info(f"❌ Error sending message to {contact_name}: {error_msg}")
-                failed_sends[contact_mobile_number] = (contact_name, f"Error: {error_msg}")
+                if not need_restart:
+                    # Skip if this contact matches progress data and we're continuing from previous progress
+                    if contact_mobile_number in contact_manager.progress_data:
+                        progress_entry = contact_manager.progress_data[contact_mobile_number]
+                        if (progress_entry.get('name') == contact_name and 
+                            progress_entry.get('message') == contact_message):
+                            logging.info(f"Skipping {contact_name} - already processed with same message")
+                            skipped_sends[contact_mobile_number] = (contact_name, "Already processed")
+                            continue
 
-            # Add a small delay between contacts
-            time.sleep(2)
+                    logging.info(f"\n{'='*50}")
+                    logging.info(f"Processing contact {current_contact}/{total_contacts}")
+                    logging.info(f"Name: {contact_name}")
+                    logging.info(f"Phone: {contact_mobile_number}")
+                    logging.info(f"{'='*50}")
+
+                    if contact_mobile_number in contact_manager.sent_numbers:
+                        skip_reason = "Message already sent previously"
+                        logging.info(f"⏭️ Skipping {contact_name}: {skip_reason}")
+                        skipped_sends[contact_mobile_number] = (contact_name, skip_reason)
+                        continue
+
+                    contact_manager.sent_numbers.add(contact_mobile_number)
+                    logging.info(f"📤 Sending message to {contact_name}...")
+
+                    try:
+                        if message_sender.send_message(contact_mobile_number, contact_message):
+                            logging.info(f"✅ Message sent successfully to {contact_name}")
+                            successful_sends[contact_mobile_number] = contact_name
+                            # Save progress with contact details
+                            contact_manager.save_progress(index, contact_name, contact_mobile_number, contact_message)
+                        else:
+                            fail_reason = "Failed to send message - Element interaction failed"
+                            logging.info(f"❌ Failed to send message to {contact_name}")
+                            failed_sends[contact_mobile_number] = (contact_name, fail_reason)
+                    except Exception as e:
+                        error_msg = str(e)
+                        logging.info(f"❌ Error sending message to {contact_name}: {error_msg}")
+                        # Session error detection
+                        if 'invalid session id' in error_msg.lower() or 'browser has closed the connection' in error_msg.lower():
+                            logging.info("Session error detected, restarting browser session to maintain continuity.")
+                            need_restart = True
+                        else:
+                            failed_sends[contact_mobile_number] = (contact_name, f"Error: {error_msg}")
+                    # Add a small delay between contacts
+                    time.sleep(2)
+            finally:
+                if need_restart:
+                    whatsapp_driver.quit()
+                    time.sleep(2)
+                    driver = whatsapp_driver.create_driver()
+                    if whatsapp_driver.initialize_whatsapp():
+                        message_sender = MessageSender(whatsapp_driver, config)
+                        logging.info("WhatsApp Web re-initialized successfully after session restart.")
+                        session_start_time = time.time()
+                    else:
+                        logging.error("Failed to re-initialize WhatsApp Web after session restart.")
+                        break
 
     except SessionNotCreatedException as e:
         logging.error(f"Session not created: {e}")
