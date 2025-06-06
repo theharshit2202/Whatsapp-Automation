@@ -15,6 +15,10 @@ import tempfile
 import shutil
 from winotify import Notification, audio
 import json
+import threading
+import http.server
+import socketserver
+import multiprocessing
 
 import pandas as pd
 from selenium import webdriver
@@ -36,6 +40,8 @@ from selenium.common.exceptions import (
 
 # Add this near the top of the file, after imports
 SESSION_RESTART_INTERVAL = 1800  # 30 minutes (change here to update everywhere)
+
+should_skip_event = threading.Event()
 
 def get_resource_path(relative_path: str = "") -> Path:
     """Get the absolute path to a resource file, accounting for frozen(executable) vs. non-frozen (script) environments.
@@ -68,7 +74,7 @@ class Config:
         
         # Set up paths for driver and contacts file using resource path
         self.CHROME_DRIVER_PATH: str = str(get_resource_path("chromedriver.exe"))
-        self.CONTACTS_FILE_PATH: str = str(get_resource_path("testing.xlsx"))
+        self.CONTACTS_FILE_PATH: str = str(get_resource_path("contacts.xlsx"))
         
         # Other settings
         self.WAIT_TIMEOUT: int = 50  # Increased to 50 seconds
@@ -426,6 +432,10 @@ class MessageSender:
             def wrapper(self, *args, **kwargs):
                 for attempt in range(max_retries):
                     try:
+                        if should_skip_event.is_set():
+                            logging.info("Skip event detected during element interaction. Skipping contact immediately.")
+                            should_skip_event.clear()
+                            return "skip"
                         return func(self, *args, **kwargs)
                     except StaleElementReferenceException:
                         if attempt == max_retries - 1:
@@ -441,6 +451,10 @@ class MessageSender:
 
     def safe_element_interaction(self, locator, action, *args, **kwargs):
         for attempt in range(self.config.MAX_RETRIES):
+            if should_skip_event.is_set():
+                logging.info("Skip event detected during element interaction. Skipping contact immediately.")
+                should_skip_event.clear()
+                return "skip"
             try:
                 # Check and refresh session if needed
                 if not self.driver.check_and_refresh_session():
@@ -480,8 +494,13 @@ class MessageSender:
                     logging.error("\n" + "*"*50 + f"\n{error_msg}")
                     return False
                 logging.warning("\n" + "*"*50 + f"\nException during {action} ({type(e).__name__}), retrying ({attempt+1}/{self.config.MAX_RETRIES})...")
-                time.sleep(self.config.RETRY_DELAY)
-        return False
+                for _ in range(int(self.config.RETRY_DELAY * 10)):
+                    if should_skip_event.is_set():
+                        logging.info("Skip event detected during retry wait. Skipping contact immediately.")
+                        should_skip_event.clear()
+                        return "skip"
+                    time.sleep(0.1)
+            return False
 
     @retry_on_stale(max_retries=3, retry_delay=1)
     def send_message(self, contact_mobile_number: str, contact_message: str) -> bool:
@@ -498,11 +517,9 @@ class MessageSender:
 
             # Search contact
             logging.info("Attempting to find search box...")
-            if not self.safe_element_interaction(search_box_locator, "clear"):
-                error_msg = "Could not clear search box"
-                self.show_notification("Error", error_msg, error=True)
-                logging.error(error_msg)
-                return False
+            result = self.safe_element_interaction(search_box_locator, "clear")
+            if result == "skip":
+                return "skip"
 
             if not self.safe_element_interaction(search_box_locator, "send_keys", Keys.CONTROL + "a"):
                 error_msg = "Could not select all text in search box"
@@ -520,6 +537,11 @@ class MessageSender:
                 return False
 
             time.sleep(2)
+            if should_skip_event.is_set():
+                logging.info("Skip event detected after entering phone number. Skipping contact immediately.")
+                should_skip_event.clear()
+                return "skip"
+
             if not self.safe_element_interaction(search_box_locator, "send_keys", Keys.ENTER):
                 error_msg = "Could not submit search"
                 self.show_notification("Error", error_msg, error=True)
@@ -541,6 +563,10 @@ class MessageSender:
                 return False
 
             time.sleep(2)
+            if should_skip_event.is_set():
+                logging.info("Skip event detected before message box interaction. Skipping contact immediately.")
+                should_skip_event.clear()
+                return "skip"
 
             # Send message
             logging.info("Attempting to find message box...")
@@ -551,6 +577,10 @@ class MessageSender:
                 return False
 
             time.sleep(2)
+            if should_skip_event.is_set():
+                logging.info("Skip event detected before clearing message box. Skipping contact immediately.")
+                should_skip_event.clear()
+                return "skip"
 
             # Clear message box thoroughly
             if not self.safe_element_interaction(message_box_locator, "clear"):
@@ -569,11 +599,19 @@ class MessageSender:
                 return False
 
             time.sleep(1)
+            if should_skip_event.is_set():
+                logging.info("Skip event detected before composing message. Skipping contact immediately.")
+                should_skip_event.clear()
+                return "skip"
 
             # Handle multi-line messages using clipboard
             try:
                 lines = contact_message.split('\n')
                 for i, line in enumerate(lines):
+                    if should_skip_event.is_set():
+                        logging.info("Skip event detected during message composition. Skipping contact immediately.")
+                        should_skip_event.clear()
+                        return "skip"
                     if line.strip():  # Only process non-empty lines
                         # Use clipboard to paste the text
                         script = f"""
@@ -589,7 +627,10 @@ class MessageSender:
                         """
                         self.driver.driver.execute_script(script)
                         time.sleep(0.5)
-
+                        if should_skip_event.is_set():
+                            logging.info("Skip event detected during message composition. Skipping contact immediately.")
+                            should_skip_event.clear()
+                            return "skip"
                         # Paste the text using keyboard shortcut
                         if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.CONTROL + "v"):
                             logging.warning(f"Failed to paste line {i+1}, trying alternative method")
@@ -601,6 +642,10 @@ class MessageSender:
                                 return False
 
                     if i < len(lines) - 1:  # If not the last line
+                        if should_skip_event.is_set():
+                            logging.info("Skip event detected during new line. Skipping contact immediately.")
+                            should_skip_event.clear()
+                            return "skip"
                         if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.SHIFT + Keys.ENTER):
                             error_msg = "Could not add new line"
                             self.show_notification("Error", error_msg, error=True)
@@ -608,13 +653,17 @@ class MessageSender:
                         time.sleep(0.5)
 
                 time.sleep(1)
+                if should_skip_event.is_set():
+                    logging.info("Skip event detected before sending message. Skipping contact immediately.")
+                    should_skip_event.clear()
+                    return "skip"
                 # Send the message
                 if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.ENTER):
                     error_msg = "Could not send message"
                     self.show_notification("Error", error_msg, error=True)
                     return False
 
-                self.show_notification("Success", "Message sent successfully!")
+                # self.show_notification("Success", "Message sent successfully!")
                 return True
 
             except Exception as e:
@@ -625,16 +674,28 @@ class MessageSender:
                 try:
                     lines = contact_message.split('\n')
                     for i, line in enumerate(lines):
+                        if should_skip_event.is_set():
+                            logging.info("Skip event detected during fallback message composition. Skipping contact immediately.")
+                            should_skip_event.clear()
+                            return "skip"
                         if line.strip():  # Only process non-empty lines
                             # Try sending the line as a whole first
                             if not self.safe_element_interaction(message_box_locator, "send_keys", line):
                                 # If that fails, try character by character
                                 for char in line:
+                                    if should_skip_event.is_set():
+                                        logging.info("Skip event detected during fallback char send. Skipping contact immediately.")
+                                        should_skip_event.clear()
+                                        return "skip"
                                     if not self.safe_element_interaction(message_box_locator, "send_keys", char):
                                         logging.warning(f"Failed to send character, continuing with next")
                                     time.sleep(0.1)
                         
                         if i < len(lines) - 1:  # If not the last line
+                            if should_skip_event.is_set():
+                                logging.info("Skip event detected during fallback new line. Skipping contact immediately.")
+                                should_skip_event.clear()
+                                return "skip"
                             if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.SHIFT + Keys.ENTER):
                                 error_msg = "Could not add new line in fallback method"
                                 self.show_notification("Error", error_msg, error=True)
@@ -642,13 +703,17 @@ class MessageSender:
                             time.sleep(0.5)
 
                     time.sleep(1)
+                    if should_skip_event.is_set():
+                        logging.info("Skip event detected before sending message in fallback. Skipping contact immediately.")
+                        should_skip_event.clear()
+                        return "skip"
                     # Send the message
                     if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.ENTER):
                         error_msg = "Could not send message in fallback method"
                         self.show_notification("Error", error_msg, error=True)
                         return False
 
-                    self.show_notification("Success", "Message sent successfully using fallback method!")
+                    # self.show_notification("Success", "Message sent successfully using fallback method!")
                     return True
                 except Exception as e2:
                     error_msg = f"Error in fallback message sending method: {str(e2)}"
@@ -677,11 +742,26 @@ class MessageSender:
             logging.error("\n" + "*"*50 + f"\n{error_msg}")
             return False
 
+def skip_server():
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/skip':
+                should_skip_event.set()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'Skipped')
+            else:
+                self.send_response(404)
+                self.end_headers()
+    with socketserver.TCPServer(("", 5050), Handler) as httpd:
+        httpd.serve_forever()
+
 def main():
     """Main execution function."""
     logging.info("\n" + "*"*50)
     logging.info(f"************ NEW RUN: {time.strftime('%Y-%m-%d %H:%M:%S')} ********")
     logging.info("*"*50 + "\n")
+    summary_printed = False
     try:
         config = Config()
     except FileNotFoundError as e:
@@ -691,7 +771,7 @@ def main():
         logging.info("1. Chrome driver (chromedriver.exe) is in the same folder as this script")
         logging.info("2. Contacts file (contacts.xlsx) is in the same folder as this script")
         logging.info("3. Chrome browser is installed with a user profile")
-        return
+        return  # <-- Make sure to return here!
 
     whatsapp_driver = WhatsAppDriver(config)
     contact_manager = ContactManager(config)
@@ -707,10 +787,9 @@ def main():
         # Load contacts first
         contacts_df = contact_manager.load_contacts()
         if contacts_df is None:
-            return
-
+            return  # <-- Make sure to return here!
         total_contacts = len(contacts_df)
-        logging.info(f"\nTotal contacts to process: {total_contacts}")
+        logging.info(f"Total contacts to process: {total_contacts}")
         
         # Compare progress with current Excel data
         matches, mismatches = contact_manager.compare_with_excel(contacts_df)
@@ -719,32 +798,30 @@ def main():
             logging.info("\nFound matching contacts in progress file:")
             for name, phone in matches:
                 logging.info(f"✓ {name} ({phone})")
-            
             logging.info("\nFound contacts with changes or new contacts:")
             for name, phone, reason in mismatches:
                 logging.info(f"! {name} ({phone}) - {reason}")
-            
+            logging.info("Prompting user: Continue from where we left off, Start fresh, or Exit.")
             while True:
                 print("\nOptions:")
                 print("1. Continue from where we left off (skip matching contacts)")
                 print("2. Start fresh (reset progress and process all contacts)")
                 print("3. Exit")
                 choice = input("\nEnter your choice (1-3): ").strip()
-                
                 if choice == '1':
-                    logging.info("Continuing from previous progress...")
+                    logging.info("User selected progress match option: 1 (Continue from previous progress)")
                     break
                 elif choice == '2':
+                    logging.info("User selected progress match option: 2 (Start fresh)")
                     contact_manager.reset_progress()
-                    logging.info("Progress reset. Starting fresh with all contacts.")
                     break
                 elif choice == '3':
-                    logging.info("Exiting program.")
+                    logging.info("User selected progress match option: 3 (Exit)")
                     return
                 else:
                     print("Invalid choice. Please enter 1, 2, or 3.")
         else:
-            logging.info("\nNo matching contacts found in progress file.")
+            logging.info("No matching contacts found in progress file.")
             if contact_manager.progress_data:
                 logging.info("Previous progress data exists but doesn't match current contacts.")
                 while True:
@@ -753,19 +830,17 @@ def main():
                     print("2. Start fresh (reset progress)")
                     print("3. Exit")
                     choice = input("\nEnter your choice (1-3): ").strip()
-                    
                     if choice == '1':
-                        logging.info("Will skip previously processed contacts...")
-                        # Keep the progress data but mark it as completed
+                        logging.info("User selected progress mismatch option: 1 (Skip previously processed contacts)")
                         for phone in contact_manager.progress_data:
                             contact_manager.sent_numbers.add(phone)
                         break
                     elif choice == '2':
+                        logging.info("User selected progress mismatch option: 2 (Start fresh)")
                         contact_manager.reset_progress()
-                        logging.info("Progress reset. Starting fresh with all contacts.")
                         break
                     elif choice == '3':
-                        logging.info("Exiting program.")
+                        logging.info("User selected progress mismatch option: 3 (Exit)")
                         return
                     else:
                         print("Invalid choice. Please enter 1, 2, or 3.")
@@ -793,12 +868,33 @@ def main():
             contact_message = row['Message']
             contact_mobile_number = contact_manager.clean_phone_number(row['Mobile Phone'])
 
+            # Show notification with skip button
+            toast = Notification(
+                app_id="WhatsApp Automation",
+                title="Ready to send WhatsApp message",
+                msg=f"Contact: {contact_name}\nPhone: {contact_mobile_number}",
+                duration="long"
+            )
+            toast.add_actions(label="Skip", launch="http://localhost:5050/skip")
+            toast.show()
+
+            # Wait a short time for user to click skip (e.g., 3 seconds)
+            time.sleep(3)
+            if should_skip_event.is_set():
+                logging.info(f"User clicked 'Skip' notification for {contact_name} ({contact_mobile_number}). Skipping and marking as processed.")
+                skipped_sends[contact_mobile_number] = (contact_name, "User skipped via notification")
+                contact_manager.save_progress(index, contact_name, contact_mobile_number, contact_message)
+                should_skip_event.clear()
+                continue
+
             # Session restart check
             need_restart = False
             if time.time() - session_start_time >= SESSION_RESTART_INTERVAL:
                 logging.info(f"Session restart interval ({SESSION_RESTART_INTERVAL} seconds) reached, restarting browser session to maintain continuity.")
                 need_restart = True
             try:
+                
+
                 if not need_restart:
                     # Skip if this contact matches progress data and we're continuing from previous progress
                     if contact_mobile_number in contact_manager.progress_data:
@@ -821,30 +917,36 @@ def main():
                         skipped_sends[contact_mobile_number] = (contact_name, skip_reason)
                         continue
 
-                    contact_manager.sent_numbers.add(contact_mobile_number)
-                    logging.info(f"📤 Sending message to {contact_name}...")
+                contact_manager.sent_numbers.add(contact_mobile_number)
+                logging.info(f"📤 Sending message to {contact_name}...")
 
-                    try:
-                        if message_sender.send_message(contact_mobile_number, contact_message):
-                            logging.info(f"✅ Message sent successfully to {contact_name}")
-                            successful_sends[contact_mobile_number] = contact_name
-                            # Save progress with contact details
-                            contact_manager.save_progress(index, contact_name, contact_mobile_number, contact_message)
-                        else:
-                            fail_reason = "Failed to send message - Element interaction failed"
-                            logging.info(f"❌ Failed to send message to {contact_name}")
-                            failed_sends[contact_mobile_number] = (contact_name, fail_reason)
-                    except Exception as e:
-                        error_msg = str(e)
-                        logging.info(f"❌ Error sending message to {contact_name}: {error_msg}")
-                        # Session error detection
-                        if 'invalid session id' in error_msg.lower() or 'browser has closed the connection' in error_msg.lower():
-                            logging.info("Session error detected, restarting browser session to maintain continuity.")
-                            need_restart = True
-                        else:
-                            failed_sends[contact_mobile_number] = (contact_name, f"Error: {error_msg}")
-                    # Add a small delay between contacts
-                    time.sleep(2)
+                try:
+                    result = message_sender.send_message(contact_mobile_number, contact_message)
+                    if result == "skip":
+                        logging.info(f"User skipped {contact_name} ({contact_mobile_number}) during message sending. Marking as processed.")
+                        skipped_sends[contact_mobile_number] = (contact_name, "User skipped during message sending")
+                        contact_manager.save_progress(index, contact_name, contact_mobile_number, contact_message)
+                        continue
+                    if result:
+                        logging.info(f"✅ Message sent successfully to {contact_name}")
+                        successful_sends[contact_mobile_number] = contact_name
+                        # Save progress with contact details
+                        contact_manager.save_progress(index, contact_name, contact_mobile_number, contact_message)
+                    else:
+                        fail_reason = "Failed to send message - Element interaction failed"
+                        logging.info(f"❌ Failed to send message to {contact_name}")
+                        failed_sends[contact_mobile_number] = (contact_name, fail_reason)
+                except Exception as e:
+                    error_msg = str(e)
+                    logging.info(f"❌ Error sending message to {contact_name}: {error_msg}")
+                    # Session error detection
+                    if 'invalid session id' in error_msg.lower() or 'browser has closed the connection' in error_msg.lower():
+                        logging.info("Session error detected, restarting browser session to maintain continuity.")
+                        need_restart = True
+                    else:
+                        failed_sends[contact_mobile_number] = (contact_name, f"Error: {error_msg}")
+                # Add a small delay between contacts
+                time.sleep(2)
             finally:
                 if need_restart:
                     whatsapp_driver.quit()
@@ -900,6 +1002,9 @@ def main():
         logging.info("\n" + "="*50)
         logging.info("END OF RUN")
         logging.info("="*50 + "\n")
+        summary_printed = True
 
 if __name__ == "__main__":
-    main() 
+    # Start the skip server in a background thread
+    threading.Thread(target=skip_server, daemon=True).start()
+    main()
