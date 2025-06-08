@@ -19,6 +19,7 @@ import threading
 import http.server
 import socketserver
 import multiprocessing
+import keyboard
 
 import pandas as pd
 from selenium import webdriver
@@ -74,7 +75,7 @@ class Config:
         
         # Set up paths for driver and contacts file using resource path
         self.CHROME_DRIVER_PATH: str = str(get_resource_path("chromedriver.exe"))
-        self.CONTACTS_FILE_PATH: str = str(get_resource_path("contacts.xlsx"))
+        self.CONTACTS_FILE_PATH: str = str(get_resource_path("harshit.xlsx"))
         
         # Other settings
         self.WAIT_TIMEOUT: int = 50  # Increased to 50 seconds
@@ -441,7 +442,7 @@ class MessageSender:
                         if attempt == max_retries - 1:
                             error_msg = f"Failed after {max_retries} attempts"
                             logging.error(error_msg)
-                            self.show_notification("Error", error_msg, error=True)
+                            # self.show_notification("Error", error_msg, error=True)
                             return False
                         logging.warning(f"Stale element, retrying ({attempt+1}/{max_retries})...")
                         time.sleep(retry_delay)
@@ -451,6 +452,7 @@ class MessageSender:
 
     def safe_element_interaction(self, locator, action, *args, **kwargs):
         for attempt in range(self.config.MAX_RETRIES):
+            # Check skip event before each attempt
             if should_skip_event.is_set():
                 logging.info("Skip event detected during element interaction. Skipping contact immediately.")
                 should_skip_event.clear()
@@ -460,7 +462,20 @@ class MessageSender:
                 if not self.driver.check_and_refresh_session():
                     raise WebDriverException("Session refresh failed")
 
+                # Check skip event before Selenium call
+                if should_skip_event.is_set():
+                    logging.info("Skip event detected before Selenium call. Skipping contact immediately.")
+                    should_skip_event.clear()
+                    return "skip"
+
                 element = self.driver.driver.find_element(*locator)
+
+                # Check skip event after Selenium call
+                if should_skip_event.is_set():
+                    logging.info("Skip event detected after Selenium call. Skipping contact immediately.")
+                    should_skip_event.clear()
+                    return "skip"
+
                 if action == "click":
                     element.click()
                 elif action == "send_keys":
@@ -485,12 +500,12 @@ class MessageSender:
                         continue
                     else:
                         error_msg = f"CRITICAL ERROR: {error_str}"
-                        self.show_notification("Critical Error", error_msg, error=True)
+                        # self.show_notification("Critical Error", error_msg, error=True)
                         logging.error("\n" + "*"*50 + f"\n{error_msg}\nTerminating program immediately.")
                         sys.exit(1)
                 if attempt == self.config.MAX_RETRIES - 1:
                     error_msg = f"Failed to interact with element after {self.config.MAX_RETRIES} attempts: {error_str}"
-                    self.show_notification("Element Interaction Failed", error_msg, error=True)
+                    # self.show_notification("Element Interaction Failed", error_msg, error=True)
                     logging.error("\n" + "*"*50 + f"\n{error_msg}")
                     return False
                 logging.warning("\n" + "*"*50 + f"\nException during {action} ({type(e).__name__}), retrying ({attempt+1}/{self.config.MAX_RETRIES})...")
@@ -523,17 +538,17 @@ class MessageSender:
 
             if not self.safe_element_interaction(search_box_locator, "send_keys", Keys.CONTROL + "a"):
                 error_msg = "Could not select all text in search box"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 return False
 
             if not self.safe_element_interaction(search_box_locator, "send_keys", Keys.DELETE):
                 error_msg = "Could not delete text in search box"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 return False
 
             if not self.safe_element_interaction(search_box_locator, "send_keys", contact_mobile_number):
                 error_msg = "Could not enter phone number in search box"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 return False
 
             time.sleep(2)
@@ -544,21 +559,21 @@ class MessageSender:
 
             if not self.safe_element_interaction(search_box_locator, "send_keys", Keys.ENTER):
                 error_msg = "Could not submit search"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 return False
 
             # Click search result
             logging.info("Attempting to find search results...")
             if not self.safe_element_interaction(search_result_locator, "click"):
                 error_msg = "Could not click search results"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 logging.error(error_msg)
                 return False
 
             logging.info("Attempting to find specific search item...")
             if not self.safe_element_interaction(search_item_locator, "click"):
                 error_msg = "Could not click search item"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 logging.error(error_msg)
                 return False
 
@@ -572,7 +587,7 @@ class MessageSender:
             logging.info("Attempting to find message box...")
             if not self.safe_element_interaction(message_box_locator, "click"):
                 error_msg = "Could not click message box"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 logging.error(error_msg)
                 return False
 
@@ -585,17 +600,17 @@ class MessageSender:
             # Clear message box thoroughly
             if not self.safe_element_interaction(message_box_locator, "clear"):
                 error_msg = "Could not clear message box"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 return False
 
             if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.CONTROL + "a"):
                 error_msg = "Could not select all text in message box"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 return False
 
             if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.DELETE):
                 error_msg = "Could not delete text in message box"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 return False
 
             time.sleep(1)
@@ -637,7 +652,7 @@ class MessageSender:
                             # Alternative method if paste fails
                             if not self.safe_element_interaction(message_box_locator, "send_keys", line):
                                 error_msg = f"Failed to send line {i+1}"
-                                self.show_notification("Error", error_msg, error=True)
+                                # self.show_notification("Error", error_msg, error=True)
                                 logging.error(error_msg)
                                 return False
 
@@ -648,7 +663,7 @@ class MessageSender:
                             return "skip"
                         if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.SHIFT + Keys.ENTER):
                             error_msg = "Could not add new line"
-                            self.show_notification("Error", error_msg, error=True)
+                            # self.show_notification("Error", error_msg, error=True)
                             return False
                         time.sleep(0.5)
 
@@ -660,7 +675,7 @@ class MessageSender:
                 # Send the message
                 if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.ENTER):
                     error_msg = "Could not send message"
-                    self.show_notification("Error", error_msg, error=True)
+                    # self.show_notification("Error", error_msg, error=True)
                     return False
 
                 # self.show_notification("Success", "Message sent successfully!")
@@ -668,7 +683,7 @@ class MessageSender:
 
             except Exception as e:
                 error_msg = f"Error in message sending method: {str(e)}"
-                self.show_notification("Error", error_msg, error=True)
+                # self.show_notification("Error", error_msg, error=True)
                 logging.error(error_msg)
                 # Fallback to simple character-by-character method
                 try:
@@ -698,7 +713,7 @@ class MessageSender:
                                 return "skip"
                             if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.SHIFT + Keys.ENTER):
                                 error_msg = "Could not add new line in fallback method"
-                                self.show_notification("Error", error_msg, error=True)
+                                # self.show_notification("Error", error_msg, error=True)
                                 return False
                             time.sleep(0.5)
 
@@ -710,14 +725,14 @@ class MessageSender:
                     # Send the message
                     if not self.safe_element_interaction(message_box_locator, "send_keys", Keys.ENTER):
                         error_msg = "Could not send message in fallback method"
-                        self.show_notification("Error", error_msg, error=True)
+                        # self.show_notification("Error", error_msg, error=True)
                         return False
 
                     # self.show_notification("Success", "Message sent successfully using fallback method!")
                     return True
                 except Exception as e2:
                     error_msg = f"Error in fallback message sending method: {str(e2)}"
-                    self.show_notification("Error", error_msg, error=True)
+                    # self.show_notification("Error", error_msg, error=True)
                     logging.error(error_msg)
                     return False
 
@@ -734,11 +749,11 @@ class MessageSender:
                 'not connected to devtools' in error_str.lower()
             ):
                 error_msg = f"CRITICAL ERROR: {error_str}"
-                self.show_notification("Critical Error", error_msg, error=True)
+                # self.show_notification("Critical Error", error_msg, error=True)
                 logging.error("\n" + "*"*50 + f"\n{error_msg}\nTerminating program immediately.")
                 sys.exit(1)
             error_msg = f"Error sending message: {error_str}"
-            self.show_notification("Error", error_msg, error=True)
+            # self.show_notification("Error", error_msg, error=True)
             logging.error("\n" + "*"*50 + f"\n{error_msg}")
             return False
 
@@ -755,6 +770,11 @@ def skip_server():
                 self.end_headers()
     with socketserver.TCPServer(("", 5050), Handler) as httpd:
         httpd.serve_forever()
+
+def skip_listener():
+    while True:
+        keyboard.wait('s')  # Wait for 's' key to be pressed
+        should_skip_event.set()
 
 def main():
     """Main execution function."""
@@ -1007,4 +1027,6 @@ def main():
 if __name__ == "__main__":
     # Start the skip server in a background thread
     threading.Thread(target=skip_server, daemon=True).start()
+    # Start the skip listener for the console in a background thread
+    threading.Thread(target=skip_listener, daemon=True).start()
     main()
